@@ -1,0 +1,196 @@
+name: Docker Build & Trivy Scan
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Local image name to build (e.g. 'nafith/gateway-manager')"
+        type: string
+        required: true
+      dockerfile_context:
+        description: "Docker build context directory"
+        type: string
+        default: "."
+      dockerfile_path:
+        description: "Path to the Dockerfile. Leave empty to use the default (Dockerfile in context)."
+        type: string
+        default: ""
+      trivy_severity:
+        description: "Comma-separated list of severities Trivy should report"
+        type: string
+        default: "CRITICAL,HIGH,MEDIUM"
+      trivy_ignore_unfixed:
+        description: "Ignore CVEs that have no fix available"
+        type: boolean
+        default: true
+      fail_on_severity:
+        description: "Fail the job if this severity has any findings (e.g. 'CRITICAL'). Leave empty to never fail."
+        type: string
+        default: ""
+
+jobs:
+  docker-scan:
+    name: Build & Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set short SHA tag
+        id: vars
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.dockerfile_context }}
+          file: ${{ inputs.dockerfile_path != '' && inputs.dockerfile_path || format('{0}/Dockerfile', inputs.dockerfile_context) }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ inputs.image_name }}:${{ steps.vars.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan
+        if: always()
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ inputs.image_name }}:${{ steps.vars.outputs.sha }}
+          format: json
+          output: trivy-report.json
+          exit-code: "0"
+          severity: ${{ inputs.trivy_severity }}
+          ignore-unfixed: ${{ inputs.trivy_ignore_unfixed }}
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        run: |
+          SHA="${{ steps.vars.outputs.sha }}"
+          BUILD_STATUS="${{ steps.build.outcome }}"
+          IMAGE_NAME="${{ inputs.image_name }}"
+
+          echo "## Docker Build & Trivy Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Tag | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$BUILD_STATUS" = "success" ]; then
+            echo "| \`$IMAGE_NAME\` | \`$SHA\` | built |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| \`$IMAGE_NAME\` | \`$SHA\` | failed |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          python3 - <<'EOF'
+          import json, os
+
+          SEV_ICON = {"CRITICAL": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM"}
+
+          def load(path):
+              if not os.path.exists(path):
+                  return []
+              with open(path) as f:
+                  data = json.load(f)
+              vulns = []
+              for result in data.get("Results", []):
+                  for v in result.get("Vulnerabilities") or []:
+                      vulns.append(v)
+              return vulns
+
+          vulns = load("trivy-report.json")
+          image_name = os.environ.get("IMAGE_NAME", "image")
+          fail_on = os.environ.get("FAIL_ON_SEVERITY", "").strip().upper()
+
+          counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
+          for v in vulns:
+              sev = v.get("Severity", "")
+              if sev in counts:
+                  counts[sev] += 1
+
+          summary = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary, "a") as s:
+              severity_label = os.environ.get("TRIVY_SEVERITY", "CRITICAL,HIGH,MEDIUM")
+              s.write(f"### Trivy CVE Scan ({severity_label} · unfixed ignored)\n\n")
+              s.write("| Image | Critical | High | Medium |\n")
+              s.write("|---|---|---|---|\n")
+
+              def cell(sev, n):
+                  return f"[{sev}] {n}" if n > 0 else f"0"
+
+              s.write(f"| `{image_name}` | {cell('CRITICAL', counts['CRITICAL'])} | {cell('HIGH', counts['HIGH'])} | {cell('MEDIUM', counts['MEDIUM'])} |\n")
+
+              flagged = [v for v in vulns if v.get("Severity") in ("CRITICAL", "HIGH")]
+              if flagged:
+                  s.write(f"\n<details>\n<summary><b>{image_name}</b> — {len(flagged)} CRITICAL/HIGH finding(s)</summary>\n\n")
+                  s.write("| Severity | CVE | Package | Installed | Fixed | Title |\n")
+                  s.write("|---|---|---|---|---|---|\n")
+                  for v in sorted(flagged, key=lambda x: (x.get("Severity", ""), x.get("VulnerabilityID", ""))):
+                      sev   = v.get("Severity", "")
+                      cve   = v.get("VulnerabilityID", "")
+                      pkg   = v.get("PkgName", "")
+                      inst  = v.get("InstalledVersion", "")
+                      fixed = v.get("FixedVersion", "") or "—"
+                      title = v.get("Title", "")[:80]
+                      cve_url = f"https://avd.aquasec.com/nvd/{cve.lower()}"
+                      s.write(f"| {sev} | [{cve}]({cve_url}) | `{pkg}` | `{inst}` | `{fixed}` | {title} |\n")
+                  s.write("\n</details>\n")
+
+              if fail_on:
+                  fail_count = counts.get(fail_on, 0)
+                  if fail_count > 0:
+                      s.write(f"\n> Pipeline set to fail on {fail_on} severity — {fail_count} finding(s) detected.\n")
+                  else:
+                      s.write(f"\n> No {fail_on} findings detected.\n")
+              else:
+                  s.write("\n> Findings are informational — pipeline does not fail on CVEs.\n")
+          EOF
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}
+          TRIVY_SEVERITY: ${{ inputs.trivy_severity }}
+
+      - name: Fail on severity threshold
+        if: inputs.fail_on_severity != ''
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          fail_on = os.environ.get("FAIL_ON_SEVERITY", "").strip().upper()
+          if not fail_on:
+              sys.exit(0)
+
+          path = "trivy-report.json"
+          if not os.path.exists(path):
+              print("No trivy report found — skipping threshold check.")
+              sys.exit(0)
+
+          with open(path) as f:
+              data = json.load(f)
+
+          count = 0
+          for result in data.get("Results", []):
+              for v in result.get("Vulnerabilities") or []:
+                  if v.get("Severity", "").upper() == fail_on:
+                      count += 1
+
+          if count > 0:
+              print(f"ERROR: {count} {fail_on} CVE(s) found. Failing as requested.")
+              sys.exit(1)
+          else:
+              print(f"No {fail_on} CVEs found. Threshold check passed.")
+          EOF
+        env:
+          FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}

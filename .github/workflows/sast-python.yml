@@ -1,0 +1,81 @@
+name: SAST — Bandit (Python)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: "Python version to use"
+        type: string
+        default: "3.12"
+      scan_paths:
+        description: "Space-separated list of paths to scan"
+        type: string
+        default: "app/"
+      severity_level:
+        description: "Minimum severity level to report (low, medium, high)"
+        type: string
+        default: "medium"
+      confidence_level:
+        description: "Minimum confidence level to report (low, medium, high)"
+        type: string
+        default: "medium"
+
+jobs:
+  sast-python:
+    name: Bandit — SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit
+        id: bandit
+        run: |
+          bandit -r ${{ inputs.scan_paths }} \
+            --severity-level ${{ inputs.severity_level }} \
+            --confidence-level ${{ inputs.confidence_level }} \
+            -f json -o bandit-report.json || true
+          bandit -r ${{ inputs.scan_paths }} \
+            --severity-level ${{ inputs.severity_level }} \
+            --confidence-level ${{ inputs.confidence_level }}
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## SAST (Bandit)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bandit-report.json ]; then
+            python3 - <<'EOF'
+          import json, os
+          with open("bandit-report.json") as f:
+              data = json.load(f)
+          results = data.get("results", [])
+          metrics = data.get("metrics", {}).get("_totals", {})
+          hi = int(metrics.get("SEVERITY.HIGH", 0))
+          me = int(metrics.get("SEVERITY.MEDIUM", 0))
+          lo = int(metrics.get("SEVERITY.LOW", 0))
+          status = "PASSED" if hi == 0 and me == 0 else "FAILED"
+          summary = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary, "a") as s:
+              s.write(f"| Status | High | Medium | Low |\n")
+              s.write(f"|---|---|---|---|\n")
+              s.write(f"| {status} | {hi} | {me} | {lo} |\n")
+          EOF
+          else
+            echo "| Status |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| PASSED — no issues found |" >> "$GITHUB_STEP_SUMMARY"
+          fi

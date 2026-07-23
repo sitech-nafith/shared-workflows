@@ -1,0 +1,62 @@
+name: Lint & Format — Ruff (Python)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: "Python version to use"
+        type: string
+        default: "3.12"
+      lint_paths:
+        description: "Space-separated list of paths to lint and format-check"
+        type: string
+        default: "."
+      ruff_version:
+        description: "Ruff version to install (e.g. '0.4.4'). Leave empty for latest."
+        type: string
+        default: ""
+
+jobs:
+  lint-python:
+    name: Ruff — lint & format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Ruff
+        run: |
+          if [ -n "${{ inputs.ruff_version }}" ]; then
+            pip install "ruff==${{ inputs.ruff_version }}"
+          else
+            pip install ruff
+          fi
+
+      - name: Lint
+        id: lint
+        run: |
+          ruff check ${{ inputs.lint_paths }} --output-format json > ruff-lint.json 2>/dev/null || true
+          ruff check ${{ inputs.lint_paths }}
+
+      - name: Format check
+        id: fmt
+        run: ruff format --check ${{ inputs.lint_paths }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Lint & Format (Ruff)" >> "$GITHUB_STEP_SUMMARY"
+          LINT_STATUS="${{ steps.lint.outcome }}"
+          FMT_STATUS="${{ steps.fmt.outcome }}"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          [ "$LINT_STATUS" = "success" ] && echo "| Lint | PASSED |" >> "$GITHUB_STEP_SUMMARY" || echo "| Lint | FAILED |" >> "$GITHUB_STEP_SUMMARY"
+          [ "$FMT_STATUS" = "success" ] && echo "| Format | PASSED |" >> "$GITHUB_STEP_SUMMARY" || echo "| Format | FAILED |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ruff-lint.json ]; then
+            COUNT=$(python3 -c "import json; d=json.load(open('ruff-lint.json')); print(len(d))" 2>/dev/null || echo 0)
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "$COUNT lint violation(s) found." >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,113 @@
+name: Test — Pytest (Python)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: "Python version to use"
+        type: string
+        default: "3.12"
+      test_paths:
+        description: "Space-separated paths to pass to pytest"
+        type: string
+        default: "tests/"
+      requirements_file:
+        description: "Requirements file to install before running tests"
+        type: string
+        default: "requirements.txt"
+      extra_packages:
+        description: "Additional pip packages to install beyond requirements (space-separated)"
+        type: string
+        default: ""
+      cov_source:
+        description: "Package/directory passed to --cov= for coverage measurement"
+        type: string
+        default: "app"
+      min_coverage:
+        description: "Minimum coverage percentage required. 0 means no threshold is enforced."
+        type: number
+        default: 0
+
+jobs:
+  test-python:
+    name: Pytest — unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r ${{ inputs.requirements_file }} pytest pytest-cov pytest-asyncio httpx
+          if [ -n "${{ inputs.extra_packages }}" ]; then
+            pip install ${{ inputs.extra_packages }}
+          fi
+
+      - name: Run tests
+        id: pytest
+        run: |
+          THRESHOLD_FLAG=""
+          if [ "${{ inputs.min_coverage }}" -gt 0 ] 2>/dev/null; then
+            THRESHOLD_FLAG="--cov-fail-under=${{ inputs.min_coverage }}"
+          fi
+          pytest ${{ inputs.test_paths }} \
+            --cov=${{ inputs.cov_source }} \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-report=json \
+            $THRESHOLD_FLAG \
+            -v \
+            --tb=short \
+            -q 2>&1 | tee pytest-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Unit Tests (Pytest)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f coverage.json ]; then
+            python3 - <<'EOF'
+          import json, os, re
+          summary_file = os.environ["GITHUB_STEP_SUMMARY"]
+
+          with open("coverage.json") as f:
+              cov = json.load(f)
+          pct = round(cov.get("totals", {}).get("percent_covered", 0), 1)
+
+          output = open("pytest-output.txt").read() if os.path.exists("pytest-output.txt") else ""
+          passed = failed = error = skipped = 0
+          m = re.search(r"(\d+) passed", output)
+          if m: passed = int(m.group(1))
+          m = re.search(r"(\d+) failed", output)
+          if m: failed = int(m.group(1))
+          m = re.search(r"(\d+) error", output)
+          if m: error = int(m.group(1))
+          m = re.search(r"(\d+) skipped", output)
+          if m: skipped = int(m.group(1))
+
+          status = "PASSED" if failed == 0 and error == 0 else "FAILED"
+          cov_icon = "OK" if pct >= 80 else "WARN" if pct >= 60 else "LOW"
+
+          with open(summary_file, "a") as s:
+              s.write(f"| Status | Passed | Failed | Skipped | Coverage |\n")
+              s.write(f"|---|---|---|---|---|\n")
+              s.write(f"| {status} | {passed} | {failed} | {skipped} | [{cov_icon}] {pct}% |\n")
+          EOF
+          else
+            if [ -f pytest-output.txt ]; then
+              SUMMARY=$(grep -E "passed|failed|error" pytest-output.txt | tail -1 || echo "No results")
+              echo "| Result |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|---|" >> "$GITHUB_STEP_SUMMARY"
+              echo "| $SUMMARY |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
