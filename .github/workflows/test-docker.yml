@@ -1,0 +1,29 @@
+name: "[Test] Docker Build & Trivy Scan"
+
+# Triggers: manual run at any time, or automatically when the workflow under
+# test or its fixtures change.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/docker-scan.yml
+      - .github/workflows/test-docker.yml
+      - test/Dockerfile
+      - test/app/**
+  pull_request:
+    paths:
+      - .github/workflows/docker-scan.yml
+      - .github/workflows/test-docker.yml
+      - test/Dockerfile
+      - test/app/**
+
+jobs:
+  docker-scan:
+    uses: ./.github/workflows/docker-scan.yml
+    with:
+      image_name: "nafith/shared-workflows-test"  # local-only tag — push: false so it never leaves the runner
+      dockerfile_context: "test/"
+      trivy_severity: "CRITICAL,HIGH"   # narrow scope for the test — avoids noise from base image MEDIUM CVEs
+      trivy_ignore_unfixed: true
+      fail_on_severity: ""              # informational only for the test run — we don't want the test to fail on base image CVEs

@@ -24,12 +24,17 @@ jobs:
   sast-python:
     name: Bandit — SAST
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # required to post SARIF results to the Security tab
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
+          cache: 'pip'
 
       - name: Install Bandit
         run: pip install bandit[toml]
@@ -40,33 +45,39 @@ jobs:
           bandit -r ${{ inputs.scan_paths }} \
             --severity-level ${{ inputs.severity_level }} \
             --confidence-level ${{ inputs.confidence_level }} \
-            -f json -o bandit-report.json || true
+            -f sarif -o bandit.sarif || true
           bandit -r ${{ inputs.scan_paths }} \
             --severity-level ${{ inputs.severity_level }} \
             --confidence-level ${{ inputs.confidence_level }}
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Upload Bandit report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bandit-report
-          path: bandit-report.json
+          path: bandit.sarif
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit.sarif
+          category: bandit  # groups results under this label in the Security tab
 
       - name: Summary
         if: always()
         run: |
           echo "## SAST (Bandit)" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f bandit-report.json ]; then
+          if [ -f bandit.sarif ]; then
             python3 - <<'EOF'
           import json, os
-          with open("bandit-report.json") as f:
+          # Bandit SARIF maps severity to SARIF levels: HIGH=error, MEDIUM=warning, LOW=note
+          with open("bandit.sarif") as f:
               data = json.load(f)
-          results = data.get("results", [])
-          metrics = data.get("metrics", {}).get("_totals", {})
-          hi = int(metrics.get("SEVERITY.HIGH", 0))
-          me = int(metrics.get("SEVERITY.MEDIUM", 0))
-          lo = int(metrics.get("SEVERITY.LOW", 0))
+          results = [r for run in data.get("runs", []) for r in run.get("results", [])]
+          hi = sum(1 for r in results if r.get("level") == "error")
+          me = sum(1 for r in results if r.get("level") == "warning")
+          lo = sum(1 for r in results if r.get("level") == "note")
           status = "PASSED" if hi == 0 and me == 0 else "FAILED"
           summary = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary, "a") as s:

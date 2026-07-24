@@ -1,0 +1,3 @@
+# Minimal requirements for the shared-workflows test fixtures.
+# pytest, pytest-cov, pytest-asyncio, and httpx are installed automatically
+# by the test-python reusable workflow — no need to repeat them here.

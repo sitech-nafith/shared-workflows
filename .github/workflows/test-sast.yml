@@ -1,0 +1,25 @@
+name: "[Test] SAST — Bandit"
+
+# Triggers: manual run at any time, or automatically when the workflow under
+# test or its fixtures change.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sast-python.yml
+      - .github/workflows/test-sast.yml
+      - test/app/**
+  pull_request:
+    paths:
+      - .github/workflows/sast-python.yml
+      - .github/workflows/test-sast.yml
+      - test/app/**
+
+jobs:
+  sast:
+    uses: ./.github/workflows/sast-python.yml
+    with:
+      scan_paths: "test/app/"       # scan only the test fixture — avoids false positives from other paths
+      severity_level: "low"         # report everything so the SARIF upload is exercised even on clean code
+      confidence_level: "low"

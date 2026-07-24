@@ -32,12 +32,17 @@ jobs:
   test-python:
     name: Pytest — unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
+          cache: 'pip'
+          cache-dependency-path: ${{ inputs.requirements_file }}
 
       - name: Install dependencies
         run: |
@@ -69,7 +74,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage.xml
+          path: |
+            coverage.xml
+            coverage.json
 
       - name: Summary
         if: always()

@@ -32,6 +32,9 @@ jobs:
   docker-scan:
     name: Build & Trivy scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -123,7 +126,9 @@ jobs:
           summary = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary, "a") as s:
               severity_label = os.environ.get("TRIVY_SEVERITY", "CRITICAL,HIGH,MEDIUM")
-              s.write(f"### Trivy CVE Scan ({severity_label} · unfixed ignored)\n\n")
+              ignore_unfixed = os.environ.get("TRIVY_IGNORE_UNFIXED", "true").lower() == "true"
+              unfixed_note = "unfixed ignored" if ignore_unfixed else "all CVEs"
+              s.write(f"### Trivy CVE Scan ({severity_label} · {unfixed_note})\n\n")
               s.write("| Image | Critical | High | Medium |\n")
               s.write("|---|---|---|---|\n")
 
@@ -161,6 +166,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image_name }}
           FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}
           TRIVY_SEVERITY: ${{ inputs.trivy_severity }}
+          TRIVY_IGNORE_UNFIXED: ${{ inputs.trivy_ignore_unfixed }}
 
       - name: Fail on severity threshold
         if: inputs.fail_on_severity != ''

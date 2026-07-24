@@ -1,0 +1,26 @@
+name: "[Test] Pytest"
+
+# Triggers: manual run at any time, or automatically when the workflow under
+# test or its fixtures change.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/test-python.yml
+      - .github/workflows/test-pytest.yml
+      - test/**
+  pull_request:
+    paths:
+      - .github/workflows/test-python.yml
+      - .github/workflows/test-pytest.yml
+      - test/**
+
+jobs:
+  pytest:
+    uses: ./.github/workflows/test-python.yml
+    with:
+      test_paths: "test/tests/"              # run only the test fixtures
+      requirements_file: "test/requirements.txt"
+      cov_source: "test/app"                 # measure coverage of the fixture app package
+      min_coverage: 80                       # enforce a threshold to exercise that feature
