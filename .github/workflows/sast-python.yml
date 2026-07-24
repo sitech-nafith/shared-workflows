@@ -42,20 +42,85 @@ jobs:
       - name: Run Bandit
         id: bandit
         run: |
+          # First pass: JSON output for artifact and Summary parsing
           bandit -r ${{ inputs.scan_paths }} \
             --severity-level ${{ inputs.severity_level }} \
             --confidence-level ${{ inputs.confidence_level }} \
-            -f sarif -o bandit.sarif || true
+            -f json -o bandit-report.json || true
+          # Second pass: human-readable output in the log; non-zero exit fails the step
           bandit -r ${{ inputs.scan_paths }} \
             --severity-level ${{ inputs.severity_level }} \
             --confidence-level ${{ inputs.confidence_level }}
 
-      - name: Upload Bandit report
+      - name: Convert Bandit JSON to SARIF
+        # Bandit has no native SARIF formatter, so we convert the JSON report ourselves.
+        # This runs even on failure so the Security tab is populated when issues are found.
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, os
+
+          SEV_MAP = {"HIGH": "error", "MEDIUM": "warning", "LOW": "note"}
+
+          if not os.path.exists("bandit-report.json"):
+              print("No bandit-report.json found — skipping SARIF generation.")
+              exit(0)
+
+          with open("bandit-report.json") as f:
+              data = json.load(f)
+
+          rules = {}
+          results = []
+          workspace = os.environ.get("GITHUB_WORKSPACE", "")
+
+          for finding in data.get("results", []):
+              rule_id = finding.get("test_id", "UNKNOWN")
+              rule_name = finding.get("test_name", rule_id)
+              if rule_id not in rules:
+                  rules[rule_id] = {
+                      "id": rule_id,
+                      "name": rule_name,
+                      "shortDescription": {"text": rule_name},
+                      "helpUri": f"https://bandit.readthedocs.io/en/latest/plugins/{rule_id.lower()}.html"
+                  }
+              filepath = finding.get("filename", "")
+              if workspace and filepath.startswith(workspace):
+                  filepath = filepath[len(workspace):].lstrip("/")
+              results.append({
+                  "ruleId": rule_id,
+                  "level": SEV_MAP.get(finding.get("issue_severity", "LOW"), "note"),
+                  "message": {"text": finding.get("issue_text", "")},
+                  "locations": [{
+                      "physicalLocation": {
+                          "artifactLocation": {"uri": filepath, "uriBaseId": "%SRCROOT%"},
+                          "region": {"startLine": finding.get("line_number", 1)}
+                      }
+                  }]
+              })
+
+          sarif = {
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [{"tool": {"driver": {
+                  "name": "Bandit",
+                  "informationUri": "https://bandit.readthedocs.io",
+                  "rules": list(rules.values())
+              }}, "results": results}]
+          }
+          with open("bandit.sarif", "w") as f:
+              json.dump(sarif, f, indent=2)
+          print(f"Generated bandit.sarif with {len(results)} result(s).")
+          EOF
+
+      - name: Upload artifacts
+        # Upload both formats: JSON for debugging, SARIF for Code Scanning
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bandit-report
-          path: bandit.sarif
+          path: |
+            bandit-report.json
+            bandit.sarif
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
@@ -68,16 +133,15 @@ jobs:
         if: always()
         run: |
           echo "## SAST (Bandit)" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f bandit.sarif ]; then
+          if [ -f bandit-report.json ]; then
             python3 - <<'EOF'
           import json, os
-          # Bandit SARIF maps severity to SARIF levels: HIGH=error, MEDIUM=warning, LOW=note
-          with open("bandit.sarif") as f:
+          with open("bandit-report.json") as f:
               data = json.load(f)
-          results = [r for run in data.get("runs", []) for r in run.get("results", [])]
-          hi = sum(1 for r in results if r.get("level") == "error")
-          me = sum(1 for r in results if r.get("level") == "warning")
-          lo = sum(1 for r in results if r.get("level") == "note")
+          metrics = data.get("metrics", {}).get("_totals", {})
+          hi = int(metrics.get("SEVERITY.HIGH", 0))
+          me = int(metrics.get("SEVERITY.MEDIUM", 0))
+          lo = int(metrics.get("SEVERITY.LOW", 0))
           status = "PASSED" if hi == 0 and me == 0 else "FAILED"
           summary = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary, "a") as s:
