@@ -19,6 +19,9 @@ on:
 jobs:
   sast:
     uses: ./.github/workflows/sast-python.yml
+    permissions:
+      contents: read
+      security-events: write  # required because sast-python.yml uploads SARIF to the Security tab
     with:
       scan_paths: "test/app/"       # scan only the test fixture — avoids false positives from other paths
       severity_level: "low"         # report everything so the SARIF upload is exercised even on clean code
