@@ -2,7 +2,8 @@ name: "[Test] Playwright E2E"
 
 # Validates the shared playwright.yml reusable workflow using a minimal
 # smoke test (example.com). This is NOT an application test — it only
-# proves the workflow template executes end-to-end correctly.
+# proves the workflow template executes end-to-end correctly, including
+# the new shard, test_paths, reporters, and extra_args inputs.
 
 on:
   workflow_dispatch:
@@ -19,17 +20,92 @@ on:
       - test/e2e/**
 
 jobs:
-  playwright:
+  # ── Smoke test: default inputs ─────────────────────────────────────────────
+  # Validates the core workflow path works with all defaults.
+  smoke-default:
     uses: ./.github/workflows/playwright.yml
     permissions:
       contents: read
     with:
       working_directory: 'test/e2e'
-      test_env: 'dev'          # No .env.dev exists — falls through to playwright config defaults
+      test_env: 'dev'          # No .env.dev — falls through to playwright.config.ts defaults
       base_url: 'https://example.com'
       test_command: 'npm test'
       node_version: 'lts/*'
       browsers: 'chromium'
       upload_report: true
       report_retention_days: 7
+      notify_slack: false
+
+  # ── Smoke test: test_paths + extra_args ───────────────────────────────────
+  # Validates that explicit test_paths and extra_args are forwarded correctly.
+  smoke-test-paths:
+    uses: ./.github/workflows/playwright.yml
+    permissions:
+      contents: read
+    with:
+      working_directory: 'test/e2e'
+      test_env: 'dev'
+      base_url: 'https://example.com'
+      test_command: 'npx playwright test'
+      test_paths: 'tests/smoke.spec.ts'
+      extra_args: '--retries=1'
+      node_version: 'lts/*'
+      browsers: 'chromium'
+      upload_report: false     # Skip report artifact for this lightweight variant
+      notify_slack: false
+
+  # ── Smoke test: reporters override ────────────────────────────────────────
+  # Validates that --reporter flag is injected when reporters input is set.
+  smoke-reporters:
+    uses: ./.github/workflows/playwright.yml
+    permissions:
+      contents: read
+    with:
+      working_directory: 'test/e2e'
+      test_env: 'dev'
+      base_url: 'https://example.com'
+      test_command: 'npx playwright test'
+      reporters: 'html,json'
+      node_version: 'lts/*'
+      browsers: 'chromium'
+      upload_report: true
+      report_retention_days: 3
+      notify_slack: false
+
+  # ── Smoke test: sharding ──────────────────────────────────────────────────
+  # Validates that --shard flag is appended when shard_index > 0.
+  # With only one spec file, shard 1/2 runs it and shard 2/2 runs nothing — both pass.
+  smoke-shard-1:
+    uses: ./.github/workflows/playwright.yml
+    permissions:
+      contents: read
+    with:
+      working_directory: 'test/e2e'
+      test_env: 'dev'
+      base_url: 'https://example.com'
+      test_command: 'npx playwright test'
+      shard_index: 1
+      shard_total: 2
+      node_version: 'lts/*'
+      browsers: 'chromium'
+      upload_report: true
+      report_retention_days: 3
+      notify_slack: false
+
+  smoke-shard-2:
+    uses: ./.github/workflows/playwright.yml
+    permissions:
+      contents: read
+    with:
+      working_directory: 'test/e2e'
+      test_env: 'dev'
+      base_url: 'https://example.com'
+      test_command: 'npx playwright test'
+      shard_index: 2
+      shard_total: 2
+      node_version: 'lts/*'
+      browsers: 'chromium'
+      upload_report: true
+      report_retention_days: 3
       notify_slack: false

@@ -1,58 +1,128 @@
 name: Playwright E2E Tests
 
-# Reusable template for Playwright E2E testing.
-# The test code STAYS in the calling repository — this workflow only orchestrates the run.
-# See: https://github.com/sitech-nafith/shared-workflows
+# Generic reusable Playwright runner — the test code STAYS in the calling repository.
+# This workflow only orchestrates the run; it works with any repo that has Playwright tests.
 #
-# CI/CD position (per flow diagram):
+# Compatible with: nafith_playwright, or any app repo with a playwright.config.ts.
+#
+# CI/CD position:
 #   push → PR → staging deploy (ArgoCD green) → [THIS WORKFLOW] → release sign-off → prod deploy
+#
+# Quick-start (from any repo):
+#   jobs:
+#     e2e:
+#       uses: sitech-nafith/shared-workflows/.github/workflows/playwright.yml@main
+#       secrets: inherit
+#       with:
+#         base_url: 'https://staging.nafith.sa/app/'
+#         test_env: 'beta'
 
 on:
   workflow_call:
     inputs:
-      # ── Environment ──────────────────────────────────────────────────────────
+
+      # ── Environment ───────────────────────────────────────────────────────────
       test_env:
         description: >
           Environment name — loads .env.<test_env> from the caller repo if present
           (e.g. alpha, beta, staging). Determines which credentials/URLs are active.
         type: string
         default: 'beta'
+
       base_url:
         description: >
           Override BASE_URL at runtime. Leave empty to use the value in .env.<test_env>.
-          Inject the ArgoCD staging URL here so tests always run against the freshly deployed env.
+          Inject the ArgoCD staging URL here so tests always hit the freshly deployed env.
         type: string
         default: ''
 
-      # ── Test execution ───────────────────────────────────────────────────────
+      # ── Test selection ────────────────────────────────────────────────────────
       test_command:
         description: >
-          Command to run tests. Examples:
-            npm test                               (main config only)
+          Base command to run tests. Examples:
+            npm test                               (uses package.json "test" script)
             npm run test:all                       (main + SSO configs)
             npx playwright test --project=chromium (single project)
         type: string
         default: 'npm test'
+
+      test_paths:
+        description: >
+          Space-separated test file/directory paths appended after test_command.
+          Leave empty to run all tests discovered by playwright.config.ts.
+          Examples: 'tests/Login/', 'tests/Sanad/B2B/ tests/Sanad/B2C/'
+        type: string
+        default: ''
+
+      extra_args:
+        description: >
+          Additional Playwright CLI arguments appended to the final command.
+          Examples: '--grep @smoke', '--retries=2', '--timeout=60000', '--headed'
+        type: string
+        default: ''
+
       config_file:
-        description: "Playwright config file (informational — set the config via test_command)"
+        description: "Playwright config file path (informational — control config via test_command)"
         type: string
         default: 'playwright.config.ts'
+
       working_directory:
         description: "Directory containing package.json and playwright config (relative to repo root)"
         type: string
         default: '.'
 
-      # ── Runtime ──────────────────────────────────────────────────────────────
+      # ── Sharding ─────────────────────────────────────────────────────────────
+      shard_index:
+        description: >
+          Current shard index (1-based). Set to 0 (default) to disable sharding.
+          To shard: call this workflow N times via matrix with shard_index 1..N and
+          shard_total N. Playwright handles which tests each shard runs automatically.
+          Example caller:
+            strategy:
+              matrix:
+                shard: [1, 2, 3, 4]
+            uses: ./.github/workflows/playwright.yml
+            with:
+              shard_index: ${{ matrix.shard }}
+              shard_total: 4
+        type: number
+        default: 0
+
+      shard_total:
+        description: "Total number of shards (must match the number of parallel callers)"
+        type: number
+        default: 1
+
+      # ── Reporters ─────────────────────────────────────────────────────────────
+      reporters:
+        description: >
+          Comma-separated reporters passed to --reporter flag.
+          Leave empty to use playwright.config.ts defaults.
+          Examples: 'html', 'html,json', 'html,junit'
+          Note: 'junit' output goes to playwright-results.xml in working_directory.
+        type: string
+        default: ''
+
+      junit_report:
+        description: >
+          Upload JUnit XML (playwright-results.xml) as a workflow artifact.
+          Enable this when reporters includes 'junit'.
+        type: boolean
+        default: false
+
+      # ── Runtime ───────────────────────────────────────────────────────────────
       node_version:
-        description: "Node.js version (e.g. 'lts/*', '20', '18')"
+        description: "Node.js version (e.g. 'lts/*', '20', '22')"
         type: string
         default: 'lts/*'
+
       browsers:
         description: >
           Space-separated browsers to install (chromium firefox webkit).
           Defaults to chromium only — extend for cross-browser runs.
         type: string
         default: 'chromium'
+
       timeout_minutes:
         description: "Job timeout in minutes"
         type: number
@@ -63,10 +133,12 @@ on:
         description: "Upload Playwright HTML report as a workflow artifact"
         type: boolean
         default: true
+
       report_retention_days:
         description: "Days to retain the HTML report artifact"
         type: number
         default: 14
+
       notify_slack:
         description: "Send a Slack notification when the job completes"
         type: boolean
@@ -79,99 +151,157 @@ on:
 
 jobs:
   playwright:
-    name: "Playwright E2E — ${{ inputs.test_env }}"
+    name: >-
+      Playwright E2E — ${{ inputs.test_env }}${{
+        inputs.shard_index > 0
+        && format(' [{0}/{1}]', inputs.shard_index, inputs.shard_total)
+        || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
-      contents: read  # checkout only — no write access needed
+      contents: read
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
 
     steps:
-      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
       - name: Checkout repository
-        # Checks out the CALLER's repository so the test code, fixtures,
-        # and .env.* files are all available without any code migration.
+        # Checks out the CALLER's repo so test code, fixtures, and .env.* files
+        # are all available — no test migration needed.
         uses: actions/checkout@v4
 
-      # ── 2. Node.js + npm cache ───────────────────────────────────────────────
+      # ── 2. Node.js + npm cache ────────────────────────────────────────────────
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
-          # Path is relative to workspace root, not working-directory
           cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      # ── 3. Playwright browser cache ──────────────────────────────────────────
+      # ── 3. Playwright browser cache ───────────────────────────────────────────
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          # Key includes browsers string so different browser combos get separate caches
-          key: playwright-${{ runner.os }}-${{ inputs.browsers }}-${{ hashFiles('**/package-lock.json') }}
+          # Separate cache per browser combination and lockfile hash
+          key: playwright-${{ runner.os }}-${{ inputs.browsers }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        # --with-deps installs required system libraries (libgbm etc.) on Ubuntu runners
+        # --with-deps installs required system libraries (libgbm, etc.) on Ubuntu runners
         run: npx playwright install --with-deps ${{ inputs.browsers }}
 
-      # ── 4. Environment setup ─────────────────────────────────────────────────
+      # ── 4. Environment setup ──────────────────────────────────────────────────
       - name: Load environment file
-        # Loads .env.<test_env> from the caller repo into GITHUB_ENV so all
-        # subsequent steps (including globalSetup.ts) can read the variables.
-        # If the file doesn't exist, tests fall back to playwright config defaults.
+        # Loads .env.<test_env> from the caller repo into GITHUB_ENV so all subsequent
+        # steps (including globalSetup.ts) can read the variables as process.env.*
+        # If the file doesn't exist, tests fall back to playwright.config.ts defaults.
         run: |
           ENV_FILE=".env.${{ inputs.test_env }}"
           if [ -f "$ENV_FILE" ]; then
             echo "Loading $ENV_FILE"
             grep -v '^#' "$ENV_FILE" | grep -v '^$' >> "$GITHUB_ENV"
           else
-            echo "$ENV_FILE not found — relying on BASE_URL input or playwright config defaults."
+            echo "$ENV_FILE not found — relying on BASE_URL input or playwright.config.ts defaults."
           fi
 
       - name: Override BASE_URL
         if: inputs.base_url != ''
-        # Applied after .env load so the input always takes precedence.
+        # Applied after .env load so the input always wins over file values.
         # This is the injection point for ArgoCD staging URLs in the CI/CD flow.
         run: echo "BASE_URL=${{ inputs.base_url }}" >> "$GITHUB_ENV"
 
-      # ── 5. Run tests ─────────────────────────────────────────────────────────
-      - name: Run Playwright tests
-        run: ${{ inputs.test_command }}
+      # ── 5. Compute artifact label ─────────────────────────────────────────────
+      - name: Set run label
+        id: label
+        # Shard suffix is empty for non-sharded runs; included for sharded runs.
+        # Used in artifact names to avoid collisions when called N times in a matrix.
+        run: |
+          if [ "${{ inputs.shard_index }}" -gt 0 ]; then
+            echo "shard_suffix=-shard${{ inputs.shard_index }}of${{ inputs.shard_total }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "shard_suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
-      # ── 6. Artifacts ─────────────────────────────────────────────────────────
+      # ── 6. Run tests ──────────────────────────────────────────────────────────
+      - name: Run Playwright tests
+        run: |
+          CMD="${{ inputs.test_command }}"
+
+          # Append specific test paths if provided (maps to playwright <file|dir>... args)
+          if [ -n "${{ inputs.test_paths }}" ]; then
+            CMD="$CMD ${{ inputs.test_paths }}"
+          fi
+
+          # Override reporters via --reporter flag if provided
+          if [ -n "${{ inputs.reporters }}" ]; then
+            CMD="$CMD --reporter=${{ inputs.reporters }}"
+          fi
+
+          # Enable sharding if shard_index > 0
+          if [ "${{ inputs.shard_index }}" -gt 0 ]; then
+            CMD="$CMD --shard=${{ inputs.shard_index }}/${{ inputs.shard_total }}"
+          fi
+
+          # Append any additional user-supplied CLI flags last
+          if [ -n "${{ inputs.extra_args }}" ]; then
+            CMD="$CMD ${{ inputs.extra_args }}"
+          fi
+
+          echo "Running: $CMD"
+          eval "$CMD"
+
+      # ── 7. Artifacts ──────────────────────────────────────────────────────────
       - name: Upload HTML report
         if: always() && inputs.upload_report
         uses: actions/upload-artifact@v4
         with:
-          # run_id suffix prevents name collisions when the workflow is called multiple times
-          name: playwright-report-${{ inputs.test_env }}-${{ github.run_id }}
+          # run_id + shard suffix prevents collisions in parallel/matrix runs
+          name: playwright-report-${{ inputs.test_env }}${{ steps.label.outputs.shard_suffix }}-${{ github.run_id }}
           path: ${{ inputs.working_directory }}/playwright-report/
           retention-days: ${{ inputs.report_retention_days }}
           if-no-files-found: ignore
+
+      - name: Upload JUnit report
+        if: always() && inputs.junit_report
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-results-${{ inputs.test_env }}${{ steps.label.outputs.shard_suffix }}-${{ github.run_id }}
+          path: ${{ inputs.working_directory }}/playwright-results.xml
+          retention-days: ${{ inputs.report_retention_days }}
+          if-no-files-found: warn
 
       - name: Upload test artifacts on failure
         if: failure()
         # Screenshots and traces only on failure — keeps storage lean
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ inputs.test_env }}-${{ github.run_id }}
+          name: test-results-${{ inputs.test_env }}${{ steps.label.outputs.shard_suffix }}-${{ github.run_id }}
           path: ${{ inputs.working_directory }}/test-results/
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 7. Summary ───────────────────────────────────────────────────────────
+      # ── 8. Summary ────────────────────────────────────────────────────────────
       - name: Summary
         if: always()
         run: |
           BASE_URL_DISPLAY="${{ inputs.base_url }}"
           [ -z "$BASE_URL_DISPLAY" ] && BASE_URL_DISPLAY="(from .env.${{ inputs.test_env }})"
+
+          SHARD_DISPLAY="—"
+          [ "${{ inputs.shard_index }}" -gt 0 ] && SHARD_DISPLAY="${{ inputs.shard_index }} / ${{ inputs.shard_total }}"
+
+          REPORTERS_DISPLAY="${{ inputs.reporters }}"
+          [ -z "$REPORTERS_DISPLAY" ] && REPORTERS_DISPLAY="(config defaults)"
+
+          TEST_PATHS_DISPLAY="${{ inputs.test_paths }}"
+          [ -z "$TEST_PATHS_DISPLAY" ] && TEST_PATHS_DISPLAY="(all)"
+
           echo "## Playwright E2E — \`${{ inputs.test_env }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
@@ -180,10 +310,13 @@ jobs:
           echo "| Base URL | \`$BASE_URL_DISPLAY\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Config | \`${{ inputs.config_file }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Command | \`${{ inputs.test_command }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test paths | \`$TEST_PATHS_DISPLAY\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Browsers | \`${{ inputs.browsers }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Shard | \`$SHARD_DISPLAY\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Reporters | \`$REPORTERS_DISPLAY\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Status | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 8. Slack notification ────────────────────────────────────────────────
+      # ── 9. Slack notification ─────────────────────────────────────────────────
       - name: Slack notification
         if: always() && inputs.notify_slack
         uses: rtCamp/action-slack-notify@v2
