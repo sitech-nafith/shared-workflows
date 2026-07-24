@@ -151,11 +151,7 @@ on:
 
 jobs:
   playwright:
-    name: >-
-      Playwright E2E — ${{ inputs.test_env }}${{
-        inputs.shard_index > 0
-        && format(' [{0}/{1}]', inputs.shard_index, inputs.shard_total)
-        || '' }}
+    name: "Playwright E2E — ${{ inputs.test_env }}${{ inputs.shard_index > 0 && format(' [{0}/{1}]', inputs.shard_index, inputs.shard_total) || '' }}"
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
@@ -189,7 +185,7 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           # Separate cache per browser combination and lockfile hash
-          key: playwright-${{ runner.os }}-${{ inputs.browsers }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: playwright-${{ runner.os }}-${{ inputs.browsers }}-${{ hashFiles('**/package-lock.json') }}
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
