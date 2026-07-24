@@ -1,0 +1,35 @@
+name: "[Test] Playwright E2E"
+
+# Validates the shared playwright.yml reusable workflow using a minimal
+# smoke test (example.com). This is NOT an application test — it only
+# proves the workflow template executes end-to-end correctly.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/playwright.yml
+      - .github/workflows/test-playwright.yml
+      - test/e2e/**
+  pull_request:
+    paths:
+      - .github/workflows/playwright.yml
+      - .github/workflows/test-playwright.yml
+      - test/e2e/**
+
+jobs:
+  playwright:
+    uses: ./.github/workflows/playwright.yml
+    permissions:
+      contents: read
+    with:
+      working_directory: 'test/e2e'
+      test_env: 'dev'          # No .env.dev exists — falls through to playwright config defaults
+      base_url: 'https://example.com'
+      test_command: 'npm test'
+      node_version: 'lts/*'
+      browsers: 'chromium'
+      upload_report: true
+      report_retention_days: 7
+      notify_slack: false
