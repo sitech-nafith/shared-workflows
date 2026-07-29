@@ -1,0 +1,99 @@
+name: OCI Start Runner
+
+on:
+  workflow_call:
+    outputs:
+      instance-id:
+        description: OCI instance OCID
+        value: ${{ jobs.start-runner.outputs.instance-id }}
+      runner-name:
+        description: GitHub Actions runner name
+        value: ${{ jobs.start-runner.outputs.runner-name }}
+
+jobs:
+  start-runner:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      instance-id: ${{ steps.launch.outputs.instance-id }}
+      runner-name: ${{ steps.launch.outputs.runner-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCI CLI
+        run: pip install oci-cli
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=/home/runner/.oci/key.pem\n' \
+            "${{ secrets.OCI_USER_OCID }}" \
+            "${{ secrets.OCI_FINGERPRINT }}" \
+            "${{ secrets.OCI_TENANCY_OCID }}" \
+            "${{ secrets.OCI_REGION }}" > ~/.oci/config
+
+      - name: Get runner registration token
+        id: reg-token
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token)
+          TOKEN=$(echo $RESPONSE | jq -r .token)
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "Failed to get token. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Launch OCI instance
+        id: launch
+        run: |
+          RUNNER_NAME="oci-runner-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "runner-name=$RUNNER_NAME" >> $GITHUB_OUTPUT
+
+          sed \
+            -e "s|__RUNNER_TOKEN__|${{ steps.reg-token.outputs.token }}|g" \
+            -e "s|__RUNNER_NAME__|$RUNNER_NAME|g" \
+            .github/scripts/cloud-init.sh > /tmp/cloud-init-rendered.sh
+
+          INSTANCE_ID=$(oci compute instance launch \
+            --compartment-id ${{ secrets.OCI_COMPARTMENT_ID }} \
+            --availability-domain "${{ secrets.OCI_AVAILABILITY_DOMAIN }}" \
+            --shape VM.Standard.A1.Flex \
+            --shape-config '{"ocpus": 2, "memory-in-gbs": 12}' \
+            --image-id ${{ secrets.OCI_IMAGE_ID }} \
+            --subnet-id ${{ secrets.OCI_SUBNET_ID }} \
+            --assign-public-ip false \
+            --display-name "$RUNNER_NAME" \
+            --user-data-file /tmp/cloud-init-rendered.sh \
+            --query 'data.id' \
+            --raw-output 2>/dev/null)
+
+          echo "instance-id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Launched instance: $INSTANCE_ID"
+
+      - name: Wait for runner to register
+        run: |
+          RUNNER_NAME="${{ steps.launch.outputs.runner-name }}"
+          echo "Waiting for $RUNNER_NAME to come online..."
+          for i in $(seq 1 20); do
+            RESPONSE=$(curl -s \
+              -H "Authorization: token ${{ secrets.GH_PAT }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/${{ github.repository }}/actions/runners)
+            STATUS=$(echo "$RESPONSE" | jq -r --arg name "$RUNNER_NAME" '.runners // [] | .[] | select(.name==$name) | .status')
+            if [ "$STATUS" = "online" ]; then
+              echo "Runner is online!"
+              exit 0
+            fi
+            echo "Attempt $i/20 — retrying in 15s..."
+            sleep 15
+          done
+          echo "Runner did not come online in time"
+          exit 1

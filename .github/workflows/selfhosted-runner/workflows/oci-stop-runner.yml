@@ -1,0 +1,53 @@
+name: OCI Stop Runner
+
+on:
+  workflow_call:
+    inputs:
+      instance-id:
+        description: OCI instance OCID to terminate
+        required: false
+        type: string
+
+jobs:
+  stop-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: pip install oci-cli
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=/home/runner/.oci/key.pem\n' \
+            "${{ secrets.OCI_USER_OCID }}" \
+            "${{ secrets.OCI_FINGERPRINT }}" \
+            "${{ secrets.OCI_TENANCY_OCID }}" \
+            "${{ secrets.OCI_REGION }}" > ~/.oci/config
+
+      - name: Terminate OCI instance
+        run: |
+          INSTANCE_ID="${{ inputs.instance-id }}"
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "null" ]; then
+            RUNNER_NAME="oci-runner-${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "No instance ID passed, looking up by name: $RUNNER_NAME"
+            INSTANCE_ID=$(oci compute instance list \
+              --compartment-id ${{ secrets.OCI_COMPARTMENT_ID }} \
+              --display-name "$RUNNER_NAME" \
+              --lifecycle-state RUNNING \
+              --query 'data[0].id' \
+              --raw-output 2>/dev/null)
+          fi
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "null" ]; then
+            echo "No running instance found, skipping termination"
+            exit 0
+          fi
+
+          echo "Terminating instance $INSTANCE_ID"
+          oci compute instance terminate \
+            --instance-id "$INSTANCE_ID" \
+            --force
+          echo "Termination request sent"
