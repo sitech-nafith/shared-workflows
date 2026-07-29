@@ -20,7 +20,12 @@ jobs:
       instance-id: ${{ steps.launch.outputs.instance-id }}
       runner-name: ${{ steps.launch.outputs.runner-name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout shared-workflows for scripts
+        uses: actions/checkout@v4
+        with:
+          repository: sitech-nafith/shared-workflows
+          token: ${{ secrets.DEVOPS_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          path: shared-workflows
 
       - name: Install OCI CLI
         run: pip install oci-cli
@@ -58,9 +63,10 @@ jobs:
           echo "runner-name=$RUNNER_NAME" >> $GITHUB_OUTPUT
 
           sed \
+            -e "s|__GITHUB_REPO__|${{ github.repository }}|g" \
             -e "s|__RUNNER_TOKEN__|${{ steps.reg-token.outputs.token }}|g" \
             -e "s|__RUNNER_NAME__|$RUNNER_NAME|g" \
-            .github/scripts/cloud-init.sh > /tmp/cloud-init-rendered.sh
+            shared-workflows/.github/scripts/cloud-init.sh > /tmp/cloud-init-rendered.sh
 
           INSTANCE_ID=$(oci compute instance launch \
             --compartment-id ${{ secrets.OCI_COMPARTMENT_ID }} \
